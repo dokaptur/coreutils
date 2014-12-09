@@ -12,19 +12,17 @@
 extern crate getopts;
 extern crate libc;
 use getopts::{optopt, optflag, getopts, usage, Matches, OptGroup};
-use std::os;
-use std::num;
-use std::io::Command;
+use std::io::process::{Command, StdioContainer};
 use std::iter::range_inclusive;
 use std::num::Int;
 
 static NAME: &'static str = "stdbuf";
 static VERSION: &'static str = "1.0.0";
+static LIBSTDBUF_PATH: &'static str = "/lib/coreutils/libstdbuf.so";
 
 #[deriving(Show)]
 enum BufferType {
 	Default,
-	Unbuffered,
 	Line,
 	Size(u64)
 }
@@ -53,10 +51,21 @@ fn print_version() {
 
 fn print_usage(opts: &[OptGroup]) {
 	let brief = 
-		"Usage: stdbuf OPTION... COMMAND\nRun COMMAND, with modified buffering operations for its standard streams\nMandatory arguments to long options are mandatory for short options too.";
-	let explaination = 
-		"If MODE is 'L' the corresponding stream will be line buffered.\nThis option is invalid with standard input.\n\nIf MODE is '0' the corresponding stream will be unbuffered.\n\nOtherwise MODE is a number which may be followed by one of the following:\n\nKB 1000, K 1024, MB 1000*1000, M 1024*1024, and so on for G, T, P, E, Z, Y.\nIn this case the corresponding stream will be fully buffered with the buffer size set to MODE bytes.\n\nNOTE: If COMMAND adjusts the buffering of its standard streams ('tee' does for e.g.) then that will override corresponding settings changed by 'stdbuf'.\nAlso some filters (like 'dd' and 'cat' etc.) don't use streams for I/O, and are thus unaffected by 'stdbuf' settings.\n";
-	println!("{}\n{}", getopts::usage(brief, opts), explaination);
+		"Usage: stdbuf OPTION... COMMAND\n \
+		Run COMMAND, with modified buffering operations for its standard streams\n \
+		Mandatory arguments to long options are mandatory for short options too.";
+	let explanation = 
+		"If MODE is 'L' the corresponding stream will be line buffered.\n \
+		This option is invalid with standard input.\n\n \
+		If MODE is '0' the corresponding stream will be unbuffered.\n\n \
+		Otherwise MODE is a number which may be followed by one of the following:\n\n \
+		KB 1000, K 1024, MB 1000*1000, M 1024*1024, and so on for G, T, P, E, Z, Y.\n \
+		In this case the corresponding stream will be fully buffered with the buffer size set to MODE bytes.\n\n \
+		NOTE: If COMMAND adjusts the buffering of its standard streams ('tee' does for e.g.) then that will override \
+		corresponding settings changed by 'stdbuf'.\n \
+		Also some filters (like 'dd' and 'cat' etc.) don't use streams for I/O, \
+		and are thus unaffected by 'stdbuf' settings.\n";
+	println!("{}\n{}", getopts::usage(brief, opts), explanation);
 }
 
 fn parse_size(size : &str) -> Option<u64> {
@@ -99,7 +108,6 @@ fn check_option(matches : &Matches, name : &str, modified : &mut bool) -> Option
 		Some(value) => {
 			*modified = true;
 			match value.as_slice() {
-				"0" => Some(BufferType::Unbuffered),
 				"L" => {
 					if name == "input" {
 						println!("stdbuf: line buffering stdin is meaningless");
@@ -147,6 +155,14 @@ fn parse_options(args : &[String], options : &mut ProgramOptions, optgrps : &[Op
 	Ok(OkMsg::Buffering)
 }
 
+fn set_command_env(command : &mut Command, buffer_name : &str, buffer_type : BufferType) {
+	match buffer_type {
+		BufferType::Size(m) => { command.env(buffer_name, m.to_string()); },
+		BufferType::Line => { command.env(buffer_name, "L"); },
+		BufferType::Default => {},
+	}
+}
+
 
 pub fn uumain(args: Vec<String>) -> int {
 	let optgrps = [
@@ -166,11 +182,11 @@ pub fn uumain(args: Vec<String>) -> int {
 			},
 			Ok(OkMsg::Help) => {
 				print_usage(&optgrps);
-				return;
+				return 0;
 			},
 			Ok(OkMsg::Version) => {
 				print_version();
-				return;
+				return 0;
 			},
 			Err(ErrMsg::Fatal) => break,
 			Err(ErrMsg::Retry) => continue,
@@ -180,16 +196,18 @@ pub fn uumain(args: Vec<String>) -> int {
 		println!("Invalid options\nTry 'stdbuf --help' for more information.");
 		return 125;
 	}
-	println!("{}", options);
 
 	let ref command_name = args[command_idx];
-	let mut process = match Command::new(command_name).args(args.slice_from(command_idx+1)).spawn() {
-		Ok(p) => p,
+	let mut command = Command::new(command_name);
+	command.args(args.slice_from(command_idx+1)).env("LD_PRELOAD", LIBSTDBUF_PATH);
+	command.stdin(StdioContainer::InheritFd(0)).stdout(StdioContainer::InheritFd(1)).stderr(StdioContainer::InheritFd(2));
+	set_command_env(&mut command, "_STDBUF_I", options.stdin);
+	set_command_env(&mut command, "_STDBUF_O", options.stdout);
+	set_command_env(&mut command, "_STDBUF_E", options.stderr);
+	match command.spawn() {
+		Ok(_) => {},
 		Err(e) => panic!("failed to execute process: {}", e),
 	};
-	
-	let output = process.stdout.as_mut().unwrap().read_to_string().ok().expect("failed to read output");
-	println!("{}", output);
 	0
 }
 
